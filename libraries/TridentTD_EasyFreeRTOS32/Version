@@ -1,0 +1,15 @@
+Version 1.0
+
+Version 1.1
+18/06/2018   add INTERRUPTS() & NO_INTERRUPTS()
+
+Version 1.2
+20/07/2022   CORE0, CORE1 supported
+
+Version 1.3
+23/09/2022   API del() supported
+
+Version 1.4
+23/09/2022   more API start(CORE1, fn) and etc
+
+
