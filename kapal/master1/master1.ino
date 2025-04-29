@@ -47,7 +47,7 @@ void readFromSlave(uint8_t slaveAddr) {
   }
   
   // Request 32 bytes which should be enough for all data
-  uint8_t bytesToRequest = 32;
+  uint8_t bytesToRequest = 64;
   uint8_t bytesReceived = Wire.requestFrom(slaveAddr, bytesToRequest);
   
   // Clear buffer
