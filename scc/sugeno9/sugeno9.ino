@@ -12,6 +12,9 @@
 #define ANALOG_PIN 18
 #define DO_PIN 15  // Pin untuk sensor DO
 
+// Pin untuk relay kontrol
+#define RELAY_PIN 4  // Pin untuk relay
+
 // Pin untuk LCD I2C
 #define SDA_PIN 8  // Pin SDA pada ESP32 S3
 #define SCL_PIN 9  // Pin SCL pada ESP32 S3
@@ -44,7 +47,7 @@ int pwmValue = 0;
 
 // SCC parameters
 const float MAX_CHARGING_CURRENT = 4.0;  // Target arus charging maksimal (A)
-const float VOLTAGE_LIMIT = 13.6;        // Batas tegangan charging (V)
+const float VOLTAGE_LIMIT = 14.0;        // Batas tegangan charging (V)
 const float CURRENT_THRESHOLD = 0.1;     // Threshold arus minimal untuk mendeteksi charging
 
 // Variabel untuk sistem charging
@@ -110,6 +113,7 @@ struct DisplayData {
   ChargingMode mode;
   float doMgL;
   int pwmValue;
+  bool relayStatus; // Tambah status relay untuk tampilan LCD
 };
 
 // Instance global dari DisplayData untuk diakses oleh kedua core
@@ -117,6 +121,15 @@ DisplayData displayData;
 
 // Task handle for DO sensor readings on Core 2
 TaskHandle_t DoSensorTask;
+
+// Konstanta untuk kontrol relay
+#define DO_THRESHOLD 1.0           // Threshold DO dalam mg/L
+#define BATTERY_LOW_THRESHOLD 11.9  // Batas bawah tegangan baterai
+#define BATTERY_RECOVER_THRESHOLD 12.4 // Batas atas recovery tegangan baterai
+
+// Variabel untuk kontrol relay
+bool relayStatus = false;      // Status relay (false = OFF, true = ON)
+bool batteryLowState = false;  // Status baterai low
 
 // Fungsi untuk membaca sampel ADC dari sensor DO
 void getDOSamples() {
@@ -190,52 +203,96 @@ bool isDOStable(uint16_t currentVoltage) {
   return false;
 }
 
+// Fungsi untuk kontrol relay berdasarkan DO dan tegangan baterai
+void controlRelay(float doValue, float batteryVoltage) {
+  // Cek jika baterai dalam keadaan low
+  if (batteryVoltage < BATTERY_LOW_THRESHOLD) {
+    batteryLowState = true;
+    relayStatus = false; // Matikan relay jika baterai low
+    Serial.println("Relay OFF: Baterai Low (<" + String(BATTERY_LOW_THRESHOLD) + "V)");
+  } 
+  // Cek jika baterai sudah recovery dari low state
+  else if (batteryLowState && batteryVoltage >= BATTERY_RECOVER_THRESHOLD) {
+    batteryLowState = false;
+    Serial.println("Baterai pulih (>" + String(BATTERY_RECOVER_THRESHOLD) + "V)");
+  }
+  
+  // Jika baterai tidak dalam status low, cek nilai DO untuk kontrol relay
+  if (!batteryLowState) {
+    if (doValue < DO_THRESHOLD) {
+      // DO rendah, nyalakan relay jika belum menyala
+      if (!relayStatus) {
+        relayStatus = true;
+        Serial.println("Relay ON: DO rendah (<" + String(DO_THRESHOLD) + " mg/L)");
+      }
+    } else {
+      // DO normal, matikan relay jika belum mati
+      if (relayStatus) {
+        relayStatus = false;
+        Serial.println("Relay OFF: DO normal (>" + String(DO_THRESHOLD) + " mg/L)");
+      }
+    }
+  }
+  
+  // Terapkan status relay ke pin
+  digitalWrite(RELAY_PIN, relayStatus ? HIGH : LOW);
+  
+  // Update status relay di displayData
+  displayData.relayStatus = relayStatus;
+}
+
 // Function untuk meng-update LCD (akan dipanggil dari Core 2)
 void updateLCD(DisplayData data) {
   // Ambil semaphore untuk akses ke LCD
   if (xSemaphoreTake(lcdMutex, (TickType_t)10) == pdTRUE) {
-    // Hapus semua isi LCD
-    lcd.clear();
-    
     // Baris 1: Status sumber dan mode charging
     lcd.setCursor(0, 0);
     if (!data.sourceDetected) {
-      lcd.print("Sumber: TIDAK ADA");
+      lcd.print("Sumber: TIDAK ADA    ");
     } else {
       lcd.print("Sumber: ADA ");
       
       // Tampilkan mode charging
       if (data.mode == BULK) {
-        lcd.print("BULK");
+        lcd.print("BULK     ");
       } else {
-        lcd.print("ABSRP");
+        lcd.print("ABSRP    ");
       }
     }
     
     // Baris 2: Tegangan
     lcd.setCursor(0, 1);
     lcd.print("V:");
-    lcd.print(data.pzem.voltage, 2);
-    lcd.print("V Lim:");
-    lcd.print(VOLTAGE_LIMIT, 1);
-    lcd.print("V");
+    char voltageStr[10];
+    sprintf(voltageStr, "%.2f", data.pzem.voltage);
+    lcd.print(voltageStr);
+    lcd.print("V            ");
     
     // Baris 3: Arus dan DO
     lcd.setCursor(0, 2);
     lcd.print("I:");
-    lcd.print(data.pzem.current, 2);
+    char currentStr[10];
+    sprintf(currentStr, "%.2f", data.pzem.current);
+    lcd.print(currentStr);
     lcd.print("A DO:");
-    lcd.print(data.doMgL, 1);
-    lcd.print("mg/L");
+    char doStr[10];
+    sprintf(doStr, "%.1f", data.doMgL);
+    lcd.print(doStr);
+    lcd.print("mg/L ");
     
-    // Baris 4: Daya dan PWM
+    // Baris 4: Daya, PWM, dan status relay
     lcd.setCursor(0, 3);
     lcd.print("P:");
-    lcd.print(data.pzem.power, 1);
+    char powerStr[10];
+    sprintf(powerStr, "%.1f", data.pzem.power);
+    lcd.print(powerStr);
     lcd.print("W PWM:");
     int pwmPercent = (int)((float)data.pwmValue / pwmMaxValue * 100.0);
-    lcd.print(pwmPercent);
-    lcd.print("%");
+    char pwmStr[5];
+    sprintf(pwmStr, "%d", pwmPercent);
+    lcd.print(pwmStr);
+    lcd.print("% R:");
+    lcd.print(data.relayStatus ? "ON " : "OFF");
     
     // Lepaskan semaphore
     xSemaphoreGive(lcdMutex);
@@ -295,6 +352,9 @@ void DOSensorTaskCode(void * parameter) {
       
       // Update nilai DO dalam struct displayData yang diakses global
       displayData.doMgL = DO_mgL;
+      
+      // Kontrol relay berdasarkan data terbaru
+      controlRelay(DO_mgL, displayData.pzem.voltage);
       
       // Log hasil ke serial (untuk debugging)
       Serial.print("DO Sensor: ");
@@ -458,7 +518,11 @@ int fuzzyPWMControl(float currentError, float voltageError) {
 void setup() {
   // Inisialisasi Serial untuk debugging
   Serial.begin(115200);
-  Serial.println("ESP32-S3 - Solar Charge Controller (SCC) with PZEM-017, LCD and DO Sensor");
+  Serial.println("ESP32-S3 - Solar Charge Controller (SCC) with PZEM-017, LCD, DO Sensor, and Relay Control");
+  
+  // Inisialisasi pin relay
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, LOW);  // Relay start in OFF state
   
   // Inisialisasi I2C untuk LCD
   Wire.begin(SDA_PIN, SCL_PIN);
@@ -477,12 +541,12 @@ void setup() {
   lcd.setCursor(0, 1);
   lcd.print("Starting...");
   lcd.setCursor(0, 2);
-  lcd.print("Max Current: ");
-  lcd.print(MAX_CHARGING_CURRENT);
-  lcd.print("A");
+  lcd.print("DO Threshold: ");
+  lcd.print(DO_THRESHOLD);
+  lcd.print("mg/L");
   lcd.setCursor(0, 3);
-  lcd.print("Volt Limit: ");
-  lcd.print(VOLTAGE_LIMIT);
+  lcd.print("Batt Low: ");
+  lcd.print(BATTERY_LOW_THRESHOLD);
   lcd.print("V");
   
   // Konfigurasi pin analog
@@ -502,6 +566,9 @@ void setup() {
   // Set target arus awal ke MAX_CHARGING_CURRENT
   targetCurrent = MAX_CHARGING_CURRENT;
   
+  // Reset status battery low state saat restart
+  batteryLowState = false;
+  
   // Inisialisasi displayData dengan nilai default
   displayData.pzem.voltage = 0.0;
   displayData.pzem.current = 0.0;
@@ -510,6 +577,7 @@ void setup() {
   displayData.mode = BULK;
   displayData.doMgL = 0.0;
   displayData.pwmValue = 0;
+  displayData.relayStatus = false;
   
   // Jalankan task DO sensor di Core 2
   xTaskCreatePinnedToCore(
@@ -526,11 +594,16 @@ void setup() {
   String helpMessage = "Solar Charge Controller initialized\n";
   helpMessage += "Max Charging Current: " + String(MAX_CHARGING_CURRENT, 1) + " A\n";
   helpMessage += "Voltage Limit: " + String(VOLTAGE_LIMIT, 1) + " V\n";
-  helpMessage += "DO Sensor enabled on pin " + String(DO_PIN) + "\n";
+  helpMessage += "DO Sensor threshold: " + String(DO_THRESHOLD, 1) + " mg/L\n";
+  helpMessage += "Relay (Pin " + String(RELAY_PIN) + ") control enabled\n";
+  helpMessage += "Battery Low Threshold: " + String(BATTERY_LOW_THRESHOLD, 1) + " V\n";
+  helpMessage += "Battery Recovery Threshold: " + String(BATTERY_RECOVER_THRESHOLD, 1) + " V\n";
   Serial.println(helpMessage);
   
   // Tambahkan delay untuk memastikan LCD telah selesai dengan pesan startup
-  delay(1000);
+  // digitalWrite(4,1);
+  // delay(2000);
+  digitalWrite(4,0);
 }
 
 void loop() {
@@ -625,6 +698,9 @@ void loop() {
     
     dataOutput += "Daya: " + String(data.power, 2) + " W\n";
     dataOutput += "PWM: " + String(pwmValue) + "/" + String(pwmMaxValue) + " (" + String((float)pwmValue / pwmMaxValue * 100.0, 2) + "%)\n";
+    dataOutput += "DO: " + String(displayData.doMgL, 2) + " mg/L (Threshold: " + String(DO_THRESHOLD, 1) + " mg/L)\n";
+    dataOutput += "Status Relay: " + String(relayStatus ? "ON" : "OFF") + "\n";
+    dataOutput += "Status Baterai: " + String(batteryLowState ? "LOW" : "NORMAL") + "\n";
     
     Serial.print(dataOutput);
   }
