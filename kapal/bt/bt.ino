@@ -6,8 +6,8 @@
 #include "BluetoothSerial.h"
 
 // LoRa pins
-#define RXD2 16  // LoRa TX to ESP32 RX2
-#define TXD2 17  // LoRa RX to ESP32 TX2
+#define RXD2 17  // LoRa TX to ESP32 RX2
+#define TXD2 16  // LoRa RX to ESP32 TX2
 
 // LED pin for visual feedback
 #define LED_BUILTIN 2  // Most ESP32 boards have an LED on GPIO2
