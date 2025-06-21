@@ -12,17 +12,17 @@
 #include <MPU6050.h>
 #include "RTClib.h"
 
-MPU6050 mpu;
+MPU6050 mpu(0x69);
 RTC_DS1307 rtc;
 
 // Variabel IMU - Accelerometer only
 float roll = 0, pitch = 0;
 
 // Pin motor horizontal dan vertikal
-const int motorHPin1 = 9;
-const int motorHPin2 = 8;
-const int motorVPin1 = 6;
-const int motorVPin2 = 7;
+const int motorHPin1 = 6;
+const int motorHPin2 = 7;
+const int motorVPin1 = 9;
+const int motorVPin2 = 8;
 
 // Kalibrasi
 unsigned long waktuMulai = 0;
@@ -68,41 +68,11 @@ void setup() {
   Serial.begin(9600);
   Wire.begin();
   
-  // Inisialisasi MPU6050 dengan konfigurasi eksplisit
-  Serial.println(F("Inisialisasi MPU6050..."));
+  // Inisialisasi MPU6050
   mpu.initialize();
-  delay(100);
-  
-  // Cek koneksi dan tampilkan info
-  if (mpu.testConnection()) {
-    Serial.println(F("MPU6050 terkoneksi pada 0x68"));
-  } else {
-    Serial.println(F("MPU6050 gagal test koneksi"));
-    Serial.println(F("Mencoba konfigurasi manual..."));
-  }
-  
-  // Konfigurasi manual MPU6050
-  mpu.setClockSource(MPU6050_CLOCK_PLL_XGYRO);
-  mpu.setFullScaleGyroRange(MPU6050_GYRO_FS_250);
-  mpu.setFullScaleAccelRange(MPU6050_ACCEL_FS_2);
-  mpu.setSleepEnabled(false);
-  delay(100);
-  
-  // Test baca accelerometer
-  int16_t ax, ay, az;
-  mpu.getAcceleration(&ax, &ay, &az);
-  
-  if (ax == 0 && ay == 0 && az == 0) {
-    Serial.println(F("MPU6050 tidak memberikan data - Cek koneksi!"));
+  if (!mpu.testConnection()) {
+    Serial.println(F("MPU6050 gagal"));
     while(1);
-  } else {
-    Serial.println(F("MPU6050 berhasil diinisialisasi"));
-    Serial.print(F("Test data - AX: "));
-    Serial.print(ax);
-    Serial.print(F(" AY: "));
-    Serial.print(ay);
-    Serial.print(F(" AZ: "));
-    Serial.println(az);
   }
   
   // Inisialisasi RTC
@@ -206,8 +176,9 @@ void cekPerubahanWaktu() {
       int bulanSekarang = waktuSekarang.month();
       
       if (jamSekarang >= 7 && jamSekarang <= 17) {
+        // Validasi batas waktu - sama seperti program asli
         if (jamSekarang == 17 && menitSekarang > 0) {
-          // Jika lewat jam 17:00, set ke 17:00
+          // Jika lewat jam 17:00, set ke 17:00 tepat
           jamSekarang = 17;
           menitSekarang = 0;
         }
@@ -317,14 +288,17 @@ void bacaInputSerial() {
         Serial.println(F(">>> WAKTU RTC DIUBAH <<<"));
         tampilkanWaktuRTC();
         
-        // Jika waktu dalam range tracking, langsung lakukan tracking
+        // Jika waktu dalam range tracking (7:00-17:00), langsung lakukan tracking
         if (jamBaru >= 7 && jamBaru <= 17) {
-          if (jamBaru == 17 && menitBaru > 0) {
+          // Bulatkan menit ke kelipatan 15 (sesuai program asli)
+          int menitRounded = (menitBaru / 15) * 15;
+          
+          // Validasi batas waktu (sesuai program asli)
+          if (jamBaru == 17 && menitRounded > 0) {
             jamBaru = 17;
-            menitBaru = 0;
+            menitRounded = 0;
           }
           
-          int menitRounded = (menitBaru / 15) * 15;
           Serial.println(F("Waktu dalam range tracking - memulai auto-tracking"));
           startAutoTracking(jamBaru, menitRounded, bulanBaru);
         } else {
@@ -470,11 +444,12 @@ void jalankanTracking() {
       }
       
       if (errorRoll > 0) {
-        motorTimur();
-        Serial.print(F("H>>Timur "));
-      } else {
         motorBarat();
         Serial.print(F("H>>Barat "));
+      } else {
+        
+        motorTimur();
+        Serial.print(F("H>>Timur "));
       }
       
       Serial.print(F("Target:"));
@@ -525,10 +500,10 @@ void jalankanTracking() {
       
       if (errorPitch > 0) {
         motorUtara();
-        Serial.print(F("V>>Utara "));
+        Serial.print(F("V>>Selatan "));
       } else {
         motorSelatan();
-        Serial.print(F("V>>Selatan "));
+        Serial.print(F("V>>Utara "));
       }
       
       Serial.print(F("Target:"));
