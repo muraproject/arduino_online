@@ -13,7 +13,7 @@
 
 // Definisi pin untuk analog input
 #define ANALOG_PIN 18
-#define DO_PIN 15  // Pin untuk sensor DO
+// Pin DO_PIN tidak digunakan lagi karena sensor DO di ESP32 lain
 
 // Pin untuk relay kontrol
 #define RELAY_PIN 4  // Pin untuk relay
@@ -21,6 +21,9 @@
 // Pin untuk LCD I2C
 #define SDA_PIN 8  // Pin SDA pada ESP32 S3
 #define SCL_PIN 9  // Pin SCL pada ESP32 S3
+
+// Alamat I2C untuk ESP32 slave yang menangani sensor DO
+#define DO_SENSOR_I2C_ADDRESS 0x08
 
 // Inisialisasi LCD (alamat I2C 0x27, 20 kolom, 4 baris)
 // Jika LCD tidak terdeteksi, coba alamat 0x3F atau alamat lainnya
@@ -90,42 +93,9 @@ struct PZEM_DATA {
   float power;
 };
 
-// DO sensor configuration
-#define VREF 3300         // VREF untuk ESP32 (3.3V = 3300 mV)
-#define ADC_RES 4095      // Resolusi ADC ESP32 (12-bit: 0-4095)
-#define READ_TEMP 25      // Suhu air dalam °C, ganti dengan sensor suhu jika ada
-
-// Single point calibration
-#define CAL1_V 1600       // mV
-#define CAL1_T 25         // °C
-
-// Parameter untuk stabilisasi pembacaan
-#define SAMPLE_INTERVAL 10      // Interval antara sampel (ms)
-#define NUM_SAMPLES 10          // Kurangi jumlah sampel untuk mengurangi beban
-#define WINDOW_SIZE 5           // Kurangi ukuran window untuk mengurangi beban
-#define STABILITY_THRESHOLD 5   // Ambang batas stabilitas (mV)
-#define STABILITY_COUNT 3       // Kurangi jumlah hitungan stabilitas
-
-// DO solubility table (saturation DO dalam air pada tekanan 101.325 kPa, unit: μg/L)
-const uint16_t DO_Table[41] = {
-    14460, 14220, 13820, 13440, 13090, 12740, 12420, 12110, 11810, 11530,
-    11260, 11010, 10770, 10530, 10300, 10080, 9860, 9660, 9460, 9270,
-    9080, 8900, 8730, 8570, 8410, 8250, 8110, 7960, 7820, 7690,
-    7560, 7430, 7300, 7180, 7070, 6950, 6840, 6730, 6630, 6530, 6410
-};
-
-// DO sensor variables
-uint8_t doTemperature;
-uint16_t DO_ADC_Raw;
-uint16_t DO_ADC_Voltage;
-uint16_t DO_Value;
-float DO_mgL;
-
-// Arrays for DO sensor samples
-uint16_t doSamples[NUM_SAMPLES];
-uint16_t doMedianWindow[WINDOW_SIZE];
-uint16_t doLastStableVoltage = 0;
-uint8_t doStabilityCounter = 0;
+// Variabel untuk sensor DO yang dibaca via I2C
+float DO_mgL = 0.0;
+bool DO_sensor_available = false;
 
 // Mutex untuk akses LCD
 SemaphoreHandle_t lcdMutex;
@@ -168,6 +138,7 @@ void setDefaultParams();
 void startAPMode();
 void setupWebServer();
 void controlRelay(float doValue, float batteryVoltage);
+float readDOFromI2C();
 
 // HTML untuk halaman konfigurasi
 const char index_html[] PROGMEM = R"rawliteral(
@@ -229,76 +200,36 @@ String getParam(AsyncWebServerRequest *request, String paramName) {
   return "";
 }
 
-// Fungsi untuk membaca sampel ADC dari sensor DO
-void getDOSamples() {
-  for (int i = 0; i < NUM_SAMPLES; i++) {
-    doSamples[i] = analogRead(DO_PIN);
-    delay(SAMPLE_INTERVAL);
-  }
-}
-
-// Fungsi untuk mengurutkan array (untuk mendapatkan median)
-void sortArray(uint16_t arr[], int size) {
-  for (int i = 0; i < size - 1; i++) {
-    for (int j = 0; j < size - i - 1; j++) {
-      if (arr[j] > arr[j + 1]) {
-        uint16_t temp = arr[j];
-        arr[j] = arr[j + 1];
-        arr[j + 1] = temp;
-      }
+// Fungsi untuk membaca data DO dari ESP32 slave via I2C
+float readDOFromI2C() {
+  float doValue = 0.0;
+  
+  // Request 4 bytes (float) dari slave
+  Wire.requestFrom(DO_SENSOR_I2C_ADDRESS, 4);
+  
+  if (Wire.available() >= 4) {
+    // Baca 4 bytes dan konversi ke float
+    byte bytes[4];
+    for (int i = 0; i < 4; i++) {
+      bytes[i] = Wire.read();
     }
-  }
-}
-
-// Fungsi untuk mendapatkan nilai median dari array
-uint16_t getMedian(uint16_t arr[], int size) {
-  // Buat salinan array agar aslinya tidak terubah
-  uint16_t temp[size];
-  for (int i = 0; i < size; i++) {
-    temp[i] = arr[i];
-  }
-  
-  // Sortir array
-  sortArray(temp, size);
-  
-  // Kembalikan nilai median
-  if (size % 2 == 0) {
-    return (temp[size/2] + temp[size/2 - 1]) / 2;
-  } else {
-    return temp[size/2];
-  }
-}
-
-// Fungsi untuk memperbarui median window
-void updateDOMedianWindow(uint16_t newValue) {
-  // Geser semua nilai satu posisi
-  for (int i = 0; i < WINDOW_SIZE - 1; i++) {
-    doMedianWindow[i] = doMedianWindow[i + 1];
-  }
-  
-  // Tambahkan nilai baru di akhir
-  doMedianWindow[WINDOW_SIZE - 1] = newValue;
-}
-
-// Fungsi untuk menghitung DO
-int16_t readDO(uint32_t voltage_mv, uint8_t temperature_c) {
-  // Single point calibration
-  uint16_t V_saturation = (uint32_t)CAL1_V + (uint32_t)35 * temperature_c - (uint32_t)CAL1_T * 35;
-  return (voltage_mv * DO_Table[temperature_c] / V_saturation);
-}
-
-// Fungsi untuk memeriksa stabilitas pembacaan DO
-bool isDOStable(uint16_t currentVoltage) {
-  if (abs((int)currentVoltage - (int)doLastStableVoltage) <= STABILITY_THRESHOLD) {
-    doStabilityCounter++;
-    if (doStabilityCounter >= STABILITY_COUNT) {
-      return true;
+    
+    // Konversi bytes ke float
+    memcpy(&doValue, bytes, 4);
+    
+    DO_sensor_available = true;
+    
+    // Validasi data (pastikan dalam range yang masuk akal)
+    if (doValue < 0 || doValue > 20) {
+      doValue = 0.0;
+      DO_sensor_available = false;
     }
   } else {
-    doLastStableVoltage = currentVoltage;
-    doStabilityCounter = 0;
+    DO_sensor_available = false;
+    doValue = 0.0;
   }
-  return false;
+  
+  return doValue;
 }
 
 // Fungsi untuk kontrol relay berdasarkan DO dan tegangan baterai
@@ -386,10 +317,14 @@ void updateLCD(DisplayData data) {
       sprintf(currentStr, "%.2f", data.pzem.current);
       lcd.print(currentStr);
       lcd.print("A DO:");
-      char doStr[10];
-      sprintf(doStr, "%.1f", data.doMgL);
-      lcd.print(doStr);
-      lcd.print("mg/L ");
+      if (DO_sensor_available) {
+        char doStr[10];
+        sprintf(doStr, "%.1f", data.doMgL);
+        lcd.print(doStr);
+        lcd.print("mg/L ");
+      } else {
+        lcd.print("N/A   ");
+      }
     }
     
     // Baris 4: Daya, PWM, dan status relay
@@ -419,14 +354,7 @@ void updateLCD(DisplayData data) {
 
 // Task untuk sensor DO dan update LCD yang berjalan di Core 2
 void DOSensorTaskCode(void * parameter) {
-  // Inisialisasi window median untuk DO sensor
-  for (int i = 0; i < WINDOW_SIZE; i++) {
-    getDOSamples();
-    doMedianWindow[i] = getMedian(doSamples, NUM_SAMPLES);
-    delay(50);
-  }
-  
-  Serial.println("DO Sensor initialized on Core 2");
+  Serial.println("DO Sensor I2C Task initialized on Core 2");
   
   // Timestamp untuk memantau interval update sensor DO
   unsigned long lastDoUpdate = 0;
@@ -445,30 +373,8 @@ void DOSensorTaskCode(void * parameter) {
       if (currentMillis - lastDoUpdate >= DO_UPDATE_INTERVAL) {
         lastDoUpdate = currentMillis;
         
-        // Set suhu
-        doTemperature = (uint8_t)READ_TEMP;
-        
-        // Ambil sampel
-        getDOSamples();
-        
-        // Hitung median dari sampel
-        uint16_t medianADC = getMedian(doSamples, NUM_SAMPLES);
-        
-        // Update median window
-        updateDOMedianWindow(medianADC);
-        
-        // Hitung median dari window
-        DO_ADC_Raw = getMedian(doMedianWindow, WINDOW_SIZE);
-        
-        // Konversi ke tegangan (mV)
-        DO_ADC_Voltage = uint32_t(VREF) * DO_ADC_Raw / ADC_RES;
-        
-        // Periksa stabilitas pembacaan
-        bool stable = isDOStable(DO_ADC_Voltage);
-        
-        // Hitung nilai DO jika stabil
-        DO_Value = readDO(DO_ADC_Voltage, doTemperature);
-        DO_mgL = DO_Value / 1000.0;
+        // Baca data DO dari ESP32 slave via I2C
+        DO_mgL = readDOFromI2C();
         
         // Update nilai DO dalam struct displayData yang diakses global
         displayData.doMgL = DO_mgL;
@@ -477,11 +383,13 @@ void DOSensorTaskCode(void * parameter) {
         controlRelay(DO_mgL, displayData.pzem.voltage);
         
         // Log hasil ke serial (untuk debugging)
-        Serial.print("DO Sensor: ");
-        Serial.print(DO_mgL, 2);
-        Serial.print(" mg/L (");
-        Serial.print(stable ? "STABIL" : "Stabilizing...");
-        Serial.println(")");
+        if (DO_sensor_available) {
+          Serial.print("DO Sensor (I2C): ");
+          Serial.print(DO_mgL, 2);
+          Serial.println(" mg/L");
+        } else {
+          Serial.println("DO Sensor (I2C): Tidak tersedia");
+        }
       }
     }
     
@@ -668,6 +576,11 @@ PZEM_DATA readPZEM() {
     // Register 0x0001: Arus
     data.current = node.getResponseBuffer(1) * 0.01; // Konversi ke ampere
     
+    // // Kompensasi arus: tambah 0.7A jika pembacaan melebihi 1A
+    // if (data.current > 1.0) {
+    //   data.current += 0.2;
+    // }
+    
     // Register 0x0002: Daya
     data.power = node.getResponseBuffer(2) * 0.1; // Konversi ke watt
   } else {
@@ -813,7 +726,7 @@ void checkAPMode() {
 void setup() {
   // Inisialisasi Serial untuk debugging
   Serial.begin(115200);
-  Serial.println("ESP32-S3 - Solar Charge Controller (SCC) with PZEM-017, LCD, DO Sensor, and Relay Control");
+  Serial.println("ESP32-S3 - Solar Charge Controller (SCC) with PZEM-017, LCD, DO Sensor (I2C), and Relay Control");
   
   // Inisialisasi EEPROM
   EEPROM.begin(EEPROM_SIZE);
@@ -828,7 +741,7 @@ void setup() {
   pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, LOW);  // Relay start in OFF state
   
-  // Inisialisasi I2C untuk LCD
+  // Inisialisasi I2C untuk LCD dan DO sensor
   Wire.begin(SDA_PIN, SCL_PIN);
   
   // Inisialisasi LCD
@@ -845,9 +758,8 @@ void setup() {
   lcd.setCursor(0, 1);
   lcd.print("Starting...");
   lcd.setCursor(0, 2);
-  lcd.print("DO Threshold: ");
-  lcd.print(DO_THRESHOLD);
-  lcd.print("mg/L");
+  lcd.print("DO via I2C: 0x");
+  lcd.print(DO_SENSOR_I2C_ADDRESS, HEX);
   lcd.setCursor(0, 3);
   lcd.print("Batt Low: ");
   lcd.print(BATTERY_LOW_THRESHOLD);
@@ -855,7 +767,6 @@ void setup() {
   
   // Konfigurasi pin analog
   pinMode(ANALOG_PIN, INPUT);
-  pinMode(DO_PIN, INPUT);  // Set DO_PIN sebagai input
   
   // Inisialisasi Serial2 untuk komunikasi RS485
   SERIAL_COMMUNICATION.begin(9600, SERIAL_8N1, RX_PIN, TX_PIN);
@@ -898,7 +809,8 @@ void setup() {
   String helpMessage = "Solar Charge Controller initialized\n";
   helpMessage += "Max Charging Current: " + String(MAX_CHARGING_CURRENT, 1) + " A\n";
   helpMessage += "Voltage Limit: " + String(VOLTAGE_LIMIT, 1) + " V\n";
-  helpMessage += "DO Sensor threshold: " + String(DO_THRESHOLD, 1) + " mg/L\n";
+  helpMessage += "DO Sensor via I2C (Address: 0x" + String(DO_SENSOR_I2C_ADDRESS, HEX) + ")\n";
+  helpMessage += "DO threshold: " + String(DO_THRESHOLD, 1) + " mg/L\n";
   helpMessage += "Relay (Pin " + String(RELAY_PIN) + ") control enabled\n";
   helpMessage += "Battery Low Threshold: " + String(BATTERY_LOW_THRESHOLD, 1) + " V\n";
   helpMessage += "Battery Recovery Threshold: " + String(BATTERY_RECOVER_THRESHOLD, 1) + " V\n";
@@ -1011,7 +923,13 @@ void loop() {
       
       dataOutput += "Daya: " + String(data.power, 2) + " W\n";
       dataOutput += "PWM: " + String(pwmValue) + "/" + String(pwmMaxValue) + " (" + String((float)pwmValue / pwmMaxValue * 100.0, 2) + "%)\n";
-      dataOutput += "DO: " + String(displayData.doMgL, 2) + " mg/L (Threshold: " + String(DO_THRESHOLD, 1) + " mg/L)\n";
+      
+      if (DO_sensor_available) {
+        dataOutput += "DO (I2C): " + String(displayData.doMgL, 2) + " mg/L (Threshold: " + String(DO_THRESHOLD, 1) + " mg/L)\n";
+      } else {
+        dataOutput += "DO (I2C): Sensor tidak tersedia\n";
+      }
+      
       dataOutput += "Status Relay: " + String(relayStatus ? "ON" : "OFF") + "\n";
       dataOutput += "Status Baterai: " + String(batteryLowState ? "LOW" : "NORMAL") + "\n";
       
