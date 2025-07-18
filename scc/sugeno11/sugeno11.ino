@@ -50,6 +50,7 @@ const int pwmMaxValue = 4000; // Nilai maksimum PWM dibatasi 3000
 
 // Variabel untuk menyimpan nilai PWM saat ini
 int pwmValue = 0;
+float trigger_do= 3.5;// ini yang di ubah
 
 // Pin untuk memicu masuk mode AP (tombol fisik)
 #define AP_TRIGGER_PIN 14  // Ganti dengan pin yang tersedia
@@ -248,17 +249,17 @@ void controlRelay(float doValue, float batteryVoltage) {
   
   // Jika baterai tidak dalam status low, cek nilai DO untuk kontrol relay
   if (!batteryLowState) {
-    if (doValue < DO_THRESHOLD) {
+    if (doValue < trigger_do) {
       // DO rendah, nyalakan relay jika belum menyala
       if (!relayStatus) {
         relayStatus = true;
-        Serial.println("Relay ON: DO rendah (<" + String(DO_THRESHOLD) + " mg/L)");
+        Serial.println("Relay ON: DO rendah (<" + String(trigger_do) + " mg/L)");
       }
     } else {
       // DO normal, matikan relay jika belum mati
       if (relayStatus) {
         relayStatus = false;
-        Serial.println("Relay OFF: DO normal (>" + String(DO_THRESHOLD) + " mg/L)");
+        Serial.println("Relay OFF: DO normal (>" + String(trigger_do) + " mg/L)");
       }
     }
   }

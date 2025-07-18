@@ -19,7 +19,7 @@
 // Parameter untuk stabilisasi pembacaan
 #define SAMPLE_INTERVAL 10      // Interval antara sampel (ms)
 #define NUM_SAMPLES 10          // Jumlah sampel untuk median
-#define WINDOW_SIZE 5           // Ukuran window untuk median filtering
+#define WINDOW_SIZE 5           // Ukuran window untuk median filtering-
 #define STABILITY_THRESHOLD 5   // Ambang batas stabilitas (mV)
 #define STABILITY_COUNT 3       // Jumlah hitungan stabilitas
 
